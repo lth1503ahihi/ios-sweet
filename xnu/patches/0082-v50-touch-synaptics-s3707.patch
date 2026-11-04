@@ -7,7 +7,7 @@ index 03defe6..cdde1ac 100644
      unsigned nr, bool stretch)
  {
 -	if (st.dead || nt > 3 || nr > 90 || (nt && nr) || (!nt && !nr)) {
-+	if (st.dead || nt > 3 || nr > 256 || (nt && nr) || (!nt && !nr)) {
++	if (nt > 3 || nr > 256 || (nt && nr) || (!nt && !nr)) {
  		return EIO;
  	}
  	if (!touch_wait_clear(st.se, SE_STATUS, 1u)) {
@@ -36,7 +36,23 @@ index 03defe6..cdde1ac 100644
 +
  static int
  touch_se_init(void)
-@@ -545,19 +558,198 @@ touch_se_init(void)
+@@ -393,7 +406,6 @@ touch_abort(void)
+ 		delay(1);
+ 	}
+ 	if (!done || !touch_wait_clear(st.se, SE_STATUS, 1u)) {
+-		st.dead = true;
+ 		printf("SWEET TOUCH: abort failed status=%#x irq=%#x; stopping\n",
+ 		    touch_rd(st.se, SE_STATUS), touch_rd(st.se, SE_IRQ));
+ 	}
+@@ -403,7 +415,6 @@ touch_abort(void)
+ 	}
+ 	touch_wr(st.se, SE_IRQ_CLR, 0xffffffffu);
+ 	if (touch_rd(st.se, SE_TX_COUNT) & 0xfffffffu) {
+-		st.dead = true;
+ 		printf("SWEET TOUCH: TX FIFO not empty after abort; stopping\n");
+ 	}
+ }
+@@ -545,19 +556,182 @@ touch_se_init(void)
  	return true;
  }
  
@@ -69,7 +85,7 @@ index 03defe6..cdde1ac 100644
  touch_thread(void *arg, wait_result_t result)
  {
 -	unsigned delay_s = 45;
-+	unsigned delay_s = 2;
++	unsigned delay_s = 1;
  	(void)arg;
  	(void)result;
 -	/*
@@ -90,16 +106,14 @@ index 03defe6..cdde1ac 100644
 +		    V50_SE_PA, V50_TLMM_PA);
 +		st.se = v50_se;
 +		st.gpio = v50_gpio;
++		st.dead = false;
 +
 +		/* Hardware power & reset sequence from sm8150-flash-touch-synaptics-s3707.dtsi */
 +		touch_gpio(59, 0, 3, 2, true, true);  /* VCL (3.3V) enable, pull-up, 4mA */
 +		touch_gpio(152, 0, 3, 2, true, true); /* VDD (1.8V) enable, pull-up, 4mA */
-+		touch_wait(10);
-+		touch_gpio(54, 0, 3, 6, true, false); /* Reset active low */
-+		touch_wait(10);
-+		touch_gpio(54, 0, 3, 6, true, true);  /* Reset release */
-+		touch_wait(120);                      /* Wait for Synaptics MCU boot */
++		touch_gpio(54, 0, 3, 6, true, true);  /* Reset high */
 +		touch_gpio(122, 0, 3, 2, false, false); /* IRQ input with pull-up */
++		touch_wait(20);
 +
 +		/* SE17 is already clocked and loaded with I2C firmware by ABL */
 +		touch_wr(st.se, SE_IRQ_CLR, 0xffffffffu);
@@ -109,35 +123,31 @@ index 03defe6..cdde1ac 100644
 +		    touch_rd(st.se, SE_STATUS), touch_rd(st.se, SE_FW),
 +		    touch_rd(st.se, SE_TX_COUNT), touch_rd(st.se, SE_RX_COUNT));
 +
-+		/* Scan I2C bus to find responding addresses */
 +		uint8_t sw_addr = 0x20;
-+		for (uint8_t a = 0x10; a <= 0x70; a++) {
-+			uint8_t dummy = 0;
-+			int err = touch_msg(a, &dummy, 1, NULL, 0, false);
-+			if (!err) {
-+				printf("SWEET TOUCH: I2C device ACK at 0x%02x\n", a);
-+				sw_addr = a;
-+			}
-+		}
-+
 +		/* Select Page 0: write 0x00 to register 0xFF */
 +		int w0 = touch_write(sw_addr, 0xff, 0x00);
-+		printf("SWEET TOUCH: select page 0 err=%d\n", w0);
++		printf("SWEET TOUCH: initial page 0 write err=%d\n", w0);
++		if (w0 != 0) {
++			printf("SWEET TOUCH: pulsing HW reset on GPIO 54\n");
++			touch_gpio(54, 0, 3, 6, true, false); /* Reset active low */
++			touch_wait(10);
++			touch_gpio(54, 0, 3, 6, true, true);  /* Reset release */
++			touch_wait(120);                      /* Wait for MCU boot */
++			w0 = touch_write(sw_addr, 0xff, 0x00);
++			printf("SWEET TOUCH: after reset page 0 write err=%d\n", w0);
++		}
 +
-+		/* Scan RMI4 PDT (0xE9 down to 0x0A, 6 bytes each) */
++		/* Scan RMI4 PDT (0xE9 down to 0xD0, 6 bytes each) */
 +		uint8_t f01_ctrl = 0, f01_data = 0;
 +		uint8_t f12_query = 0, f12_ctrl = 0, f12_data = 0;
 +		struct rmi_pdt_desc dsc;
-+		for (uint8_t pdt = 0xe9; pdt >= 0x0a; pdt -= 6) {
++		for (uint8_t pdt = 0xe9; pdt >= 0xd0; pdt -= 6) {
 +			int pe = touch_read(sw_addr, pdt, false, (uint8_t *)&dsc, sizeof(dsc));
++			printf("SWEET TOUCH: PDT 0x%02x: err=%d fn=0x%02x q=0x%02x c=0x%02x d=0x%02x\n",
++			    pdt, pe, dsc.fn_num, dsc.query_base, dsc.ctrl_base, dsc.data_base);
 +			if (pe || !dsc.fn_num) {
-+				if (pdt == 0xe9) {
-+					printf("SWEET TOUCH: read PDT 0xe9 err=%d\n", pe);
-+				}
 +				break;
 +			}
-+			printf("SWEET TOUCH: PDT 0x%02x: fn=0x%02x q=0x%02x c=0x%02x d=0x%02x\n",
-+			    pdt, dsc.fn_num, dsc.query_base, dsc.ctrl_base, dsc.data_base);
 +			if (dsc.fn_num == 0x01) {
 +				f01_ctrl = dsc.ctrl_base;
 +				f01_data = dsc.data_base;
@@ -184,23 +194,11 @@ index 03defe6..cdde1ac 100644
 +		printf("SWEET TOUCH: S3707 F12 data_base=0x%02x finger_data_reg=0x%02x\n",
 +		    f12_data, finger_data_reg);
 +
-+		/* Simulated unlock test if requested */
-+		int test_sec = 0;
-+		(void)PE_parse_boot_argn("sweethidtest", &test_sec, sizeof(test_sec));
-+		if (test_sec > 0) {
-+			touch_wait(test_sec * 1000u);
-+			printf("SWEET TOUCH: test unlock swipe-up\n");
-+			for (int sy = 3000; sy >= 1000; sy -= 100) {
-+				sweet_hid_touch(0, 1, 720, sy);
-+				touch_wait(16);
-+			}
-+			sweet_hid_touch(0, 0, 720, 1000);
-+			printf("SWEET TOUCH: test unlock swipe done\n");
-+		}
-+
 +		/* Main touch read loop */
 +		int read_err_cnt = 0;
-+		while (!st.dead) {
++		printf("SWEET TOUCH: loop running (addr=0x%02x reg=0x%02x)\n",
++		    sw_addr, finger_data_reg);
++		while (1) {
 +			struct s3707_touch_data f[10];
 +			int err = touch_read(sw_addr, finger_data_reg, false, (uint8_t *)f, sizeof(f));
 +			if (!err) {
@@ -214,14 +212,14 @@ index 03defe6..cdde1ac 100644
 +					}
 +				}
 +				if (mask) {
-+					printf("SWEET TOUCH: touch mask=0x%x x=%d y=%d\n", mask, x[0], y[0]);
++					printf("SWEET TOUCH: DOWN mask=0x%x x=%d y=%d\n", mask, x[0], y[0]);
 +				}
 +				touch_report(mask, x, y);
 +			} else {
-+				if ((read_err_cnt++ % 100) == 0) {
++				if ((read_err_cnt++ % 200) == 0) {
 +					printf("SWEET TOUCH: read err=%d irq=0x%08x\n", err, st.irq_status);
 +				}
-+				delay(2000);
++				delay(1000);
 +			}
 +			touch_wait(10);
 +		}
