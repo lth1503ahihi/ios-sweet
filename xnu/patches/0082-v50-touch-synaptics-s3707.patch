@@ -2,84 +2,204 @@ diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
 index 03defe6..cdde1ac 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
-@@ -214,7 +214,7 @@ static int
- touch_msg_run(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx,
-     unsigned nr, bool stretch)
- {
--	if (st.dead || nt > 3 || nr > 90 || (nt && nr) || (!nt && !nr)) {
-+	if (nt > 3 || nr > 256 || (nt && nr) || (!nt && !nr)) {
- 		return EIO;
- 	}
- 	if (!touch_wait_clear(st.se, SE_STATUS, 1u)) {
-@@ -304,6 +304,19 @@ touch_msg(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx,
- 	return err;
- }
- 
-+static int
-+touch_write(uint8_t addr, uint8_t reg, uint8_t val)
-+{
-+	uint8_t pkt[2] = { reg, val };
-+	return touch_msg(addr, pkt, 2, NULL, 0, false);
-+}
-+
-+static int
-+touch_read(uint8_t addr, uint16_t reg, bool wide, uint8_t *buf, unsigned len)
-+{
-+	uint8_t ptr[2] = {(uint8_t)(reg >> 8), (uint8_t)reg};
-+	int err = touch_msg(addr, wide ? ptr : ptr + 1, wide ? 2u : 1u,
-+	    NULL, 0, false);
-+	if (err) {
-+		return err;
-+	}
-+	return touch_msg(addr, NULL, 0, buf, len, false);
-+}
-+
- static int
- touch_se_init(void)
-@@ -393,7 +406,6 @@ touch_abort(void)
- 		delay(1);
- 	}
- 	if (!done || !touch_wait_clear(st.se, SE_STATUS, 1u)) {
--		st.dead = true;
- 		printf("SWEET TOUCH: abort failed status=%#x irq=%#x; stopping\n",
- 		    touch_rd(st.se, SE_STATUS), touch_rd(st.se, SE_IRQ));
- 	}
-@@ -403,7 +415,6 @@ touch_abort(void)
- 	}
- 	touch_wr(st.se, SE_IRQ_CLR, 0xffffffffu);
- 	if (touch_rd(st.se, SE_TX_COUNT) & 0xfffffffu) {
--		st.dead = true;
- 		printf("SWEET TOUCH: TX FIFO not empty after abort; stopping\n");
- 	}
- }
-@@ -545,19 +556,182 @@ touch_se_init(void)
+@@ -545,19 +545,178 @@ touch_se_init(void)
  	return true;
  }
  
-+#pragma pack(1)
-+struct s3707_touch_data {
-+	uint8_t type;
-+	uint8_t x_lsb;
-+	uint8_t x_msb;
-+	uint8_t y_lsb;
-+	uint8_t y_msb;
-+	uint8_t z;
-+	uint8_t wx;
-+	uint8_t wy;
-+};
++#define V50_TLMM_PA      0x03000000u
++#define V50_SDA_PIN      55
++#define V50_SCL_PIN      56
++#define V50_RESET_PIN    54
++#define V50_IRQ_PIN      122
++#define V50_VCL_PIN      59
++#define V50_VDD_PIN      152
 +
-+struct rmi_pdt_desc {
-+	uint8_t query_base;
-+	uint8_t cmd_base;
-+	uint8_t ctrl_base;
-+	uint8_t data_base;
-+	uint8_t int_src;
-+	uint8_t fn_num;
-+};
-+#pragma pack()
++static inline void
++v50_bb_set(unsigned pin, int release)
++{
++	uint32_t o = pin * 0x1000u;
++	uint32_t cfg = touch_rd(st.gpio, o) & ~0x3ffu;
++	touch_wr(st.gpio, o + 4, touch_rd(st.gpio, o + 4) & ~2u);
++	touch_wr(st.gpio, o, cfg | 3u | (release ? 0 : 0x200u));
++	delay(5);
++}
 +
-+#define V50_SE_PA        0x00c80000u
-+#define V50_TLMM_PA      0x03d00000u  /* TLMM SOUTH tile on SM8150 (pins 54, 55, 56, 59, 122, 152) */
++static inline int
++v50_bb_get(unsigned pin)
++{
++	uint32_t o = pin * 0x1000u;
++	return (touch_rd(st.gpio, o + 4) & 1u);
++}
++
++static int
++v50_bb_high(void)
++{
++	v50_bb_set(V50_SCL_PIN, 1);
++	for (unsigned i = 0; i < 1000; i++) {
++		if (v50_bb_get(V50_SCL_PIN)) {
++			delay(5);
++			return 0;
++		}
++		delay(10);
++	}
++	return -1;
++}
++
++static int
++v50_bb_start(int repeat)
++{
++	v50_bb_set(V50_SDA_PIN, 1);
++	if (v50_bb_high() != 0) return -1;
++	if (!v50_bb_get(V50_SDA_PIN)) return repeat ? -2 : -3;
++	v50_bb_set(V50_SDA_PIN, 0);
++	v50_bb_set(V50_SCL_PIN, 0);
++	return 0;
++}
++
++static int
++v50_bb_stop(void)
++{
++	v50_bb_set(V50_SDA_PIN, 0);
++	if (v50_bb_high() != 0) {
++		v50_bb_set(V50_SDA_PIN, 1);
++		v50_bb_set(V50_SCL_PIN, 1);
++		return -1;
++	}
++	v50_bb_set(V50_SDA_PIN, 1);
++	return v50_bb_get(V50_SDA_PIN) ? 0 : -1;
++}
++
++static int
++v50_bb_write(uint8_t val)
++{
++	for (unsigned i = 0; i < 8; i++) {
++		int bit = (val >> (7 - i)) & 1;
++		v50_bb_set(V50_SDA_PIN, bit);
++		if (v50_bb_high() != 0) return -1;
++		v50_bb_set(V50_SCL_PIN, 0);
++	}
++	v50_bb_set(V50_SDA_PIN, 1);
++	if (v50_bb_high() != 0) return -1;
++	int ack = !v50_bb_get(V50_SDA_PIN);
++	v50_bb_set(V50_SCL_PIN, 0);
++	return ack ? 0 : -2;
++}
++
++static int
++v50_bb_read(uint8_t *val, int last)
++{
++	unsigned v = 0;
++	v50_bb_set(V50_SDA_PIN, 1);
++	for (unsigned i = 0; i < 8; i++) {
++		if (v50_bb_high() != 0) return -1;
++		v = (v << 1) | (unsigned)v50_bb_get(V50_SDA_PIN);
++		v50_bb_set(V50_SCL_PIN, 0);
++	}
++	v50_bb_set(V50_SDA_PIN, last ? 1 : 0);
++	if (v50_bb_high() != 0) return -1;
++	v50_bb_set(V50_SCL_PIN, 0);
++	v50_bb_set(V50_SDA_PIN, 1);
++	*val = (uint8_t)v;
++	return 0;
++}
++
++static int
++v50_sw_xfer(const uint8_t *tx, unsigned nt, uint8_t *rx, unsigned nr)
++{
++	int e = v50_bb_start(0);
++	if (e) {
++		v50_bb_set(V50_SDA_PIN, 1); v50_bb_set(V50_SCL_PIN, 1);
++		return e;
++	}
++	e = v50_bb_write(0x50);
++	if (e) goto fail;
++	for (unsigned i = 0; i < nt; i++) {
++		e = v50_bb_write(tx[i]);
++		if (e) goto fail;
++	}
++	if (nr) {
++		e = v50_bb_start(1);
++		if (e) goto fail;
++		e = v50_bb_write(0x51);
++		if (e) goto fail;
++		for (unsigned i = 0; i < nr; i++) {
++			e = v50_bb_read(&rx[i], (i + 1 == nr) ? 1 : 0);
++			if (e) goto fail;
++		}
++	}
++	e = v50_bb_stop();
++	v50_bb_set(V50_SDA_PIN, 1); v50_bb_set(V50_SCL_PIN, 1);
++	return e;
++fail:
++	v50_bb_stop();
++	v50_bb_set(V50_SDA_PIN, 1); v50_bb_set(V50_SCL_PIN, 1);
++	return e;
++}
++
++static int
++v50_sw_regread(unsigned reg, uint8_t *buf, unsigned n)
++{
++	uint8_t ptr[2] = {
++		(uint8_t)((n > 4 ? 0x20 : 0) | ((reg >> 8) & 15)),
++		(uint8_t)reg
++	};
++	return v50_sw_xfer(ptr, 2, buf, n);
++}
++
++static int
++v50_sw_regwrite(unsigned reg, uint32_t val)
++{
++	uint8_t b[6] = {
++		(uint8_t)(0x40 | ((reg >> 8) & 15)),
++		(uint8_t)reg,
++		(uint8_t)val,
++		(uint8_t)(val >> 8),
++		(uint8_t)(val >> 16),
++		(uint8_t)(val >> 24)
++	};
++	return v50_sw_xfer(b, 6, NULL, 0);
++}
++
++static inline uint32_t
++v50_le32(const uint8_t *p)
++{
++	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
++}
++
++static inline unsigned
++v50_report_extra(const uint8_t *b)
++{
++	uint32_t h = v50_le32(b + 8);
++	unsigned n = (h >> 8) & 31;
++	if ((h & 255) != 0 || n <= 1 || n > 10) return 0;
++	return (((v50_le32(b + 4) >> 16) & 15) == 5) ? 12 * (n - 1) : 108;
++}
++
++static int
++v50_decode(const uint8_t *b, unsigned len, uint32_t *out_mask, int *out_x, int *out_y)
++{
++	if (len < 36) return -1;
++	uint32_t h = v50_le32(b + 8);
++	if ((h & 255) != 0) return 1;
++	unsigned n = (h >> 8) & 31;
++	if (n > 10 || len < 36 + 12 * n) return -1;
++	*out_mask = 0;
++	uint32_t seen = 0;
++	if (h >> 31) return 0;
++	for (unsigned i = 0; i < n; i++) {
++		const uint8_t *p = b + 36 + i * 12;
++		uint32_t a = v50_le32(p), c = v50_le32(p + 4);
++		unsigned id = a & 31, ev = (a >> 16) & 3, x = a >> 18, y = c & 0x3fff;
++		if (id == 15) { *out_mask = 0; return 0; }
++		if (id >= 10 || (seen & (1u << id))) return -1;
++		seen |= (1u << id);
++		if (ev == 0 || ev == 3) continue;
++		*out_mask |= (1u << id);
++		out_x[id] = (int)(x > 1439 ? 1439 : x);
++		out_y[id] = (int)(y > 3119 ? 3119 : y);
++	}
++	return 0;
++}
 +
  static void
  touch_thread(void *arg, wait_result_t result)
@@ -99,129 +219,78 @@ index 03defe6..cdde1ac 100644
 +		touch_wait(delay_s * 1000u);
 +	}
 +
-+	vm_offset_t v50_se = ml_io_map(V50_SE_PA, 0x4000);
-+	vm_offset_t v50_gpio = ml_io_map(V50_TLMM_PA, 0x100000);
-+	if (v50_se && v50_gpio) {
-+		printf("SWEET TOUCH: detected LG V50 SM8150 QUP SE17 at 0x%08x, TLMM SOUTH at 0x%08x\n",
-+		    V50_SE_PA, V50_TLMM_PA);
-+		st.se = v50_se;
-+		st.gpio = v50_gpio;
-+		st.dead = false;
++	vm_offset_t v50_tlmm = ml_io_map(V50_TLMM_PA, 0x100000);
++	if (v50_tlmm) {
++		printf("SWEET TOUCH: LG V50 SW42000 GPIO-I2C driver at TLMM 0x%08x\n", V50_TLMM_PA);
++		st.gpio = v50_tlmm;
 +
-+		/* Hardware power & reset sequence from sm8150-flash-touch-synaptics-s3707.dtsi */
-+		touch_gpio(59, 0, 3, 2, true, true);  /* VCL (3.3V) enable, pull-up, 4mA */
-+		touch_gpio(152, 0, 3, 2, true, true); /* VDD (1.8V) enable, pull-up, 4mA */
-+		touch_gpio(54, 0, 3, 6, true, true);  /* Reset high */
-+		touch_gpio(122, 0, 3, 2, false, false); /* IRQ input with pull-up */
-+		touch_wait(20);
++		/* Power & Reset pins */
++		touch_gpio(V50_VCL_PIN, 0, 3, 2, true);  /* VCL (3.3V) enable */
++		touch_gpio(V50_VDD_PIN, 0, 3, 2, true); /* VDD (1.8V) enable */
++		touch_gpio(V50_RESET_PIN, 0, 3, 6, true); /* Reset high */
++		touch_gpio(V50_IRQ_PIN, 0, 3, 2, false); /* IRQ input with pull-up */
 +
-+		/* SE17 is already clocked and loaded with I2C firmware by ABL */
-+		touch_wr(st.se, SE_IRQ_CLR, 0xffffffffu);
-+		touch_wr(st.se, SE_IRQ_EN, SE_EVENTS);
++		/* Configure SDA (GPIO 55) & SCL (GPIO 56) to high-Z release */
++		v50_bb_set(V50_SDA_PIN, 1);
++		v50_bb_set(V50_SCL_PIN, 1);
++		touch_wait(50);
 +
-+		printf("SWEET TOUCH: SE17 status=0x%08x fw=0x%08x tx_c=0x%08x rx_c=0x%08x\n",
-+		    touch_rd(st.se, SE_STATUS), touch_rd(st.se, SE_FW),
-+		    touch_rd(st.se, SE_TX_COUNT), touch_rd(st.se, SE_RX_COUNT));
++		/* Probe SW42000 at address 0x28, register 0x642 */
++		uint8_t version[4] = {0};
++		int pe = v50_sw_regread(0x642, version, 4);
++		printf("SWEET TOUCH: probe 0x28 rc=%d ver=0x%08x\n", pe, v50_le32(version));
 +
-+		uint8_t sw_addr = 0x20;
-+		/* Select Page 0: write 0x00 to register 0xFF */
-+		int w0 = touch_write(sw_addr, 0xff, 0x00);
-+		printf("SWEET TOUCH: initial page 0 write err=%d\n", w0);
-+		if (w0 != 0) {
-+			printf("SWEET TOUCH: pulsing HW reset on GPIO 54\n");
-+			touch_gpio(54, 0, 3, 6, true, false); /* Reset active low */
++		if (pe != 0) {
++			printf("SWEET TOUCH: pulsing reset on GPIO %u\n", V50_RESET_PIN);
++			uint32_t o54 = V50_RESET_PIN * 0x1000u;
++			touch_wr(st.gpio, o54 + 4, touch_rd(st.gpio, o54 + 4) & ~2u);
++			touch_wr(st.gpio, o54, (touch_rd(st.gpio, o54) & ~0x3ffu) | 0x200u);
 +			touch_wait(10);
-+			touch_gpio(54, 0, 3, 6, true, true);  /* Reset release */
-+			touch_wait(120);                      /* Wait for MCU boot */
-+			w0 = touch_write(sw_addr, 0xff, 0x00);
-+			printf("SWEET TOUCH: after reset page 0 write err=%d\n", w0);
++			touch_wr(st.gpio, o54 + 4, touch_rd(st.gpio, o54 + 4) | 2u);
++			touch_wait(120);
++			pe = v50_sw_regread(0x642, version, 4);
++			printf("SWEET TOUCH: after reset probe rc=%d ver=0x%08x\n", pe, v50_le32(version));
 +		}
 +
-+		/* Scan RMI4 PDT (0xE9 down to 0xD0, 6 bytes each) */
-+		uint8_t f01_ctrl = 0, f01_data = 0;
-+		uint8_t f12_query = 0, f12_ctrl = 0, f12_data = 0;
-+		struct rmi_pdt_desc dsc;
-+		for (uint8_t pdt = 0xe9; pdt >= 0xd0; pdt -= 6) {
-+			int pe = touch_read(sw_addr, pdt, false, (uint8_t *)&dsc, sizeof(dsc));
-+			printf("SWEET TOUCH: PDT 0x%02x: err=%d fn=0x%02x q=0x%02x c=0x%02x d=0x%02x\n",
-+			    pdt, pe, dsc.fn_num, dsc.query_base, dsc.ctrl_base, dsc.data_base);
-+			if (pe || !dsc.fn_num) {
-+				break;
-+			}
-+			if (dsc.fn_num == 0x01) {
-+				f01_ctrl = dsc.ctrl_base;
-+				f01_data = dsc.data_base;
-+			} else if (dsc.fn_num == 0x12) {
-+				f12_query = dsc.query_base;
-+				f12_ctrl = dsc.ctrl_base;
-+				f12_data = dsc.data_base;
-+			}
-+		}
++		/* Initialize operating registers */
++		v50_sw_regwrite(0xfe4, 0);
++		v50_sw_regwrite(0xc00, 1);
++		v50_sw_regwrite(0xc01, 1);
++		v50_sw_regwrite(0xc03, 4);
++		touch_wait(30);
++		v50_sw_regwrite(0xc03, 0x8303);
++		touch_wait(50);
 +
-+		/* If F01 found, check status and set configured */
-+		if (f01_ctrl || f01_data) {
-+			uint8_t dev_stat = 0;
-+			(void)touch_read(sw_addr, f01_data, false, &dev_stat, 1);
-+			printf("SWEET TOUCH: F01 dev_status=0x%02x\n", dev_stat);
-+			if (dev_stat == 0x81 || dev_stat != 0x00) {
-+				(void)touch_write(sw_addr, f01_ctrl, 0x80); /* Set Configured */
-+				touch_wait(10);
-+				(void)touch_read(sw_addr, f01_data, false, &dev_stat, 1);
-+				printf("SWEET TOUCH: F01 after configure dev_status=0x%02x\n", dev_stat);
-+			}
-+		}
++		printf("SWEET TOUCH: SW42000 event loop running (SDA=%u SCL=%u IRQ=%u)\n",
++		    V50_SDA_PIN, V50_SCL_PIN, V50_IRQ_PIN);
 +
-+		/* Determine finger data register offset */
-+		uint8_t finger_data_reg = f12_data ? (f12_data + 1) : 0x03;
-+		if (f12_query) {
-+			uint8_t q7 = 0;
-+			int qe = touch_read(sw_addr, f12_query + 7, false, &q7, 1);
-+			if (!qe && q7 > 0 && q7 <= 16) {
-+				uint8_t q8[16] = {0};
-+				(void)touch_read(sw_addr, f12_query + 8, false, q8, q7);
-+				uint8_t offset = 0;
-+				for (int i = 0; i < (q7 - 1) * 8; i++) {
-+					if (q8[(i / 8) + 1] & (1 << (i % 8))) {
-+						if (i == 1) {
-+							finger_data_reg = f12_data + offset;
-+							break;
-+						}
-+						offset++;
-+					}
-+				}
-+			}
-+		}
-+		printf("SWEET TOUCH: S3707 F12 data_base=0x%02x finger_data_reg=0x%02x\n",
-+		    f12_data, finger_data_reg);
-+
-+		/* Main touch read loop */
-+		int read_err_cnt = 0;
-+		printf("SWEET TOUCH: loop running (addr=0x%02x reg=0x%02x)\n",
-+		    sw_addr, finger_data_reg);
++		uint32_t last_mask = 0;
 +		while (1) {
-+			struct s3707_touch_data f[10];
-+			int err = touch_read(sw_addr, finger_data_reg, false, (uint8_t *)f, sizeof(f));
-+			if (!err) {
-+				uint32_t mask = 0;
-+				int x[TOUCH_MAX] = {0}, y[TOUCH_MAX] = {0};
-+				for (unsigned i = 0; i < 10; ++i) {
-+					if (f[i].type == 1) { /* finger down */
-+						mask |= (1u << i);
-+						x[i] = (int)(f[i].x_lsb | ((unsigned)f[i].x_msb << 8));
-+						y[i] = (int)(f[i].y_lsb | ((unsigned)f[i].y_msb << 8));
++			uint32_t o122 = V50_IRQ_PIN * 0x1000u;
++			int irq_low = !(touch_rd(st.gpio, o122 + 4) & 1u);
++			if (irq_low) {
++				uint8_t b[156] = {0};
++				unsigned rlen = 48;
++				int e = v50_sw_regread(0x600, b, rlen);
++				if (!e) {
++					unsigned extra = v50_report_extra(b);
++					if (extra && extra <= 108) {
++						(void)v50_sw_regread(0x60c, b + 48, extra);
++						rlen += extra;
++					}
++					uint32_t mask = 0;
++					int x[TOUCH_MAX] = {0}, y[TOUCH_MAX] = {0};
++					int d = v50_decode(b, rlen, &mask, x, y);
++					if (d == 0) {
++						if (mask != last_mask) {
++							printf("SWEET TOUCH: mask=0x%x x=%d y=%d\n", mask, x[0], y[0]);
++							last_mask = mask;
++						}
++						touch_report(mask, x, y);
 +					}
 +				}
-+				if (mask) {
-+					printf("SWEET TOUCH: DOWN mask=0x%x x=%d y=%d\n", mask, x[0], y[0]);
-+				}
-+				touch_report(mask, x, y);
-+			} else {
-+				if ((read_err_cnt++ % 200) == 0) {
-+					printf("SWEET TOUCH: read err=%d irq=0x%08x\n", err, st.irq_status);
-+				}
-+				delay(1000);
 +			}
-+			touch_wait(10);
++			touch_wait(5);
 +		}
 +		touch_report(0, st.x, st.y);
 +		goto out;
