@@ -140,6 +140,14 @@ const char *loader_boot(uintptr_t dtb)
 	con_hex("JUMP", entry_pa);
 	con_str("XNU", "jumping (fbcon clears screen)");
 
+	/* Disable Qualcomm Hardware Watchdog (APCS_WDOG) at 0x17c10000 */
+	volatile uint32_t *qcom_wdt = (volatile uint32_t *)0x17c10000UL;
+	qcom_wdt[1] = 1;		/* WDT_RST */
+	qcom_wdt[2] = 0;		/* WDT_EN = 0 */
+	qcom_wdt[0x38 / 4] = 1;		/* v2 WDT_RST */
+	qcom_wdt[0x40 / 4] = 0;		/* v2 WDT_EN = 0 */
+	con_str("WDT", "Qualcomm HW watchdog disabled");
+
 	/* Everything was written with the MMU and caches off; drop any stale I-cache lines too. */
 	__asm__ volatile("dsb sy; ic iallu; dsb sy; isb" ::: "memory");
 	((xnu_entry_t)entry_pa)(ba_pa);

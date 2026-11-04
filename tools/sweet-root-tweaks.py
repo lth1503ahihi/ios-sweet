@@ -145,6 +145,9 @@ def main():
                            'ShouldRunKeychainSyncMiniBuddy', 'ShouldRunMesaMiniBuddy',
                            'ShouldRunPaymentMiniBuddy', 'ShouldRunStandardMiniBuddy',
                            'SilentICDPUpgrade')})
+    merge_pref(root, 'com.apple.Accessibility', {
+        'ReduceTransparency': True,
+        'ReduceMotion': True})
     merge_pref(root, 'com.apple.managedconfiguration.notbackedup', {
         'LockdownActivationIndicatesCloudConfigurationAvailable': False})
 

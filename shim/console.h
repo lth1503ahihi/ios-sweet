@@ -2,10 +2,11 @@
 #include <stdint.h>
 
 #define FB_BASE		0x9c000000UL	/* reserved-memory cont_splash_region */
-#define FB_W		1080
-#define FB_H		2400
+#define FB_W		1440
+#define FB_H		3120
 #define FB_STRIDE	(FB_W * 4)	/* a8r8g8b8, matches mainline simplefb */
 
+#define BLACK	0x00000000U
 #define RED	0xffff0000U
 #define BLUE	0xff0000a0U
 #define WHITE	0xffffffffU
