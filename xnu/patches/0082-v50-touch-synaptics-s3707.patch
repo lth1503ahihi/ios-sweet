@@ -2,11 +2,12 @@ diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
 index 03defe6..cdde1ac 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
-@@ -545,19 +545,178 @@ touch_se_init(void)
+@@ -545,19 +545,214 @@ touch_se_init(void)
  	return true;
  }
  
-+#define V50_TLMM_PA      0x03000000u
++#define V50_TLMM_PA      0x03d00000u
++#define V50_GCC_PA       0x00100000u
 +#define V50_SDA_PIN      55
 +#define V50_SCL_PIN      56
 +#define V50_RESET_PIN    54
@@ -104,14 +105,14 @@ index 03defe6..cdde1ac 100644
 +}
 +
 +static int
-+v50_sw_xfer(const uint8_t *tx, unsigned nt, uint8_t *rx, unsigned nr)
++v50_sw_xfer(uint8_t slv, const uint8_t *tx, unsigned nt, uint8_t *rx, unsigned nr)
 +{
 +	int e = v50_bb_start(0);
 +	if (e) {
 +		v50_bb_set(V50_SDA_PIN, 1); v50_bb_set(V50_SCL_PIN, 1);
 +		return e;
 +	}
-+	e = v50_bb_write(0x50);
++	e = v50_bb_write((uint8_t)(slv << 1));
 +	if (e) goto fail;
 +	for (unsigned i = 0; i < nt; i++) {
 +		e = v50_bb_write(tx[i]);
@@ -120,7 +121,7 @@ index 03defe6..cdde1ac 100644
 +	if (nr) {
 +		e = v50_bb_start(1);
 +		if (e) goto fail;
-+		e = v50_bb_write(0x51);
++		e = v50_bb_write((uint8_t)((slv << 1) | 1));
 +		if (e) goto fail;
 +		for (unsigned i = 0; i < nr; i++) {
 +			e = v50_bb_read(&rx[i], (i + 1 == nr) ? 1 : 0);
@@ -143,7 +144,7 @@ index 03defe6..cdde1ac 100644
 +		(uint8_t)((n > 4 ? 0x20 : 0) | ((reg >> 8) & 15)),
 +		(uint8_t)reg
 +	};
-+	return v50_sw_xfer(ptr, 2, buf, n);
++	return v50_sw_xfer(0x28, ptr, 2, buf, n);
 +}
 +
 +static int
@@ -157,7 +158,7 @@ index 03defe6..cdde1ac 100644
 +		(uint8_t)(val >> 16),
 +		(uint8_t)(val >> 24)
 +	};
-+	return v50_sw_xfer(b, 6, NULL, 0);
++	return v50_sw_xfer(0x28, b, 6, NULL, 0);
 +}
 +
 +static inline uint32_t
@@ -221,38 +222,59 @@ index 03defe6..cdde1ac 100644
 +
 +	vm_offset_t v50_tlmm = ml_io_map(V50_TLMM_PA, 0x100000);
 +	if (v50_tlmm) {
-+		printf("SWEET TOUCH: LG V50 SW42000 GPIO-I2C driver at TLMM 0x%08x\n", V50_TLMM_PA);
++		printf("SWEET TOUCH: LG V50 SW42000 GPIO-I2C driver at TLMM SOUTH 0x%08x\n", V50_TLMM_PA);
 +		st.gpio = v50_tlmm;
 +
-+		/* Power & Reset pins */
-+		touch_gpio(V50_VCL_PIN, 0, 3, 2, true);  /* VCL (3.3V) enable */
-+		touch_gpio(V50_VDD_PIN, 0, 3, 2, true); /* VDD (1.8V) enable */
-+		touch_gpio(V50_RESET_PIN, 0, 3, 6, true); /* Reset high */
-+		touch_gpio(V50_IRQ_PIN, 0, 3, 2, false); /* IRQ input with pull-up */
++		/* Vote GCC clocks for Wrapper 1 AHB & QUP17 SE */
++		vm_offset_t gcc = ml_io_map(V50_GCC_PA, 0x60000);
++		if (gcc) {
++			touch_wr(gcc, 0x5200c, touch_rd(gcc, 0x5200c) | (1u << 20) | (1u << 21) | (1u << 27));
++			touch_wr(gcc, 0x18734, touch_rd(gcc, 0x18734) | 1u);
++			printf("SWEET TOUCH: GCC 0x5200c=%#x 0x18734=%#x\n",
++			    touch_rd(gcc, 0x5200c), touch_rd(gcc, 0x18734));
++		}
++
++		/* Power pins: VCL (3.3V) and VDD (1.8V) enable */
++		touch_gpio(V50_VCL_PIN, 0, 3, 2, true);
++		touch_gpio(V50_VDD_PIN, 0, 3, 2, true);
++		touch_wait(20);
++
++		/* Reset sequence: pulse LOW on GPIO 54 */
++		printf("SWEET TOUCH: pulsing HW reset on GPIO %u\n", V50_RESET_PIN);
++		touch_gpio(V50_RESET_PIN, 0, 0, 2, true);
++		touch_wr(st.gpio, V50_RESET_PIN * 0x1000u + 4, touch_rd(st.gpio, V50_RESET_PIN * 0x1000u + 4) & ~2u);
++		touch_wait(30);
++		touch_wr(st.gpio, V50_RESET_PIN * 0x1000u + 4, touch_rd(st.gpio, V50_RESET_PIN * 0x1000u + 4) | 2u);
++		touch_wait(120);
++
++		/* IRQ pin: GPIO 122 input with pull-up */
++		touch_gpio(V50_IRQ_PIN, 0, 3, 2, false);
 +
 +		/* Configure SDA (GPIO 55) & SCL (GPIO 56) to high-Z release */
 +		v50_bb_set(V50_SDA_PIN, 1);
 +		v50_bb_set(V50_SCL_PIN, 1);
-+		touch_wait(50);
++		touch_wait(20);
++
++		/* Scan I2C bus (0x08 to 0x77) */
++		printf("SWEET TOUCH: scanning I2C bus on GPIO %u/%u...\n", V50_SDA_PIN, V50_SCL_PIN);
++		int found_slaves = 0;
++		for (unsigned a = 0x08; a <= 0x77; a++) {
++			if (v50_bb_start(0) == 0) {
++				if (v50_bb_write((uint8_t)(a << 1)) == 0) {
++					printf("SWEET TOUCH: FOUND I2C SLAVE AT 0x%02x!\n", a);
++					found_slaves++;
++				}
++				v50_bb_stop();
++			}
++		}
++		printf("SWEET TOUCH: scan complete, %d devices found\n", found_slaves);
 +
 +		/* Probe SW42000 at address 0x28, register 0x642 */
 +		uint8_t version[4] = {0};
 +		int pe = v50_sw_regread(0x642, version, 4);
 +		printf("SWEET TOUCH: probe 0x28 rc=%d ver=0x%08x\n", pe, v50_le32(version));
 +
-+		if (pe != 0) {
-+			printf("SWEET TOUCH: pulsing reset on GPIO %u\n", V50_RESET_PIN);
-+			uint32_t o54 = V50_RESET_PIN * 0x1000u;
-+			touch_wr(st.gpio, o54 + 4, touch_rd(st.gpio, o54 + 4) & ~2u);
-+			touch_wr(st.gpio, o54, (touch_rd(st.gpio, o54) & ~0x3ffu) | 0x200u);
-+			touch_wait(10);
-+			touch_wr(st.gpio, o54 + 4, touch_rd(st.gpio, o54 + 4) | 2u);
-+			touch_wait(120);
-+			pe = v50_sw_regread(0x642, version, 4);
-+			printf("SWEET TOUCH: after reset probe rc=%d ver=0x%08x\n", pe, v50_le32(version));
-+		}
-+
-+		/* Initialize operating registers */
++		/* Initialize SW42000 operating registers */
 +		v50_sw_regwrite(0xfe4, 0);
 +		v50_sw_regwrite(0xc00, 1);
 +		v50_sw_regwrite(0xc01, 1);
@@ -265,10 +287,12 @@ index 03defe6..cdde1ac 100644
 +		    V50_SDA_PIN, V50_SCL_PIN, V50_IRQ_PIN);
 +
 +		uint32_t last_mask = 0;
++		unsigned loop_cnt = 0;
 +		while (1) {
 +			uint32_t o122 = V50_IRQ_PIN * 0x1000u;
 +			int irq_low = !(touch_rd(st.gpio, o122 + 4) & 1u);
-+			if (irq_low) {
++			loop_cnt++;
++			if (irq_low || (last_mask != 0) || (loop_cnt % 10 == 0)) {
 +				uint8_t b[156] = {0};
 +				unsigned rlen = 48;
 +				int e = v50_sw_regread(0x600, b, rlen);
@@ -283,7 +307,7 @@ index 03defe6..cdde1ac 100644
 +					int d = v50_decode(b, rlen, &mask, x, y);
 +					if (d == 0) {
 +						if (mask != last_mask) {
-+							printf("SWEET TOUCH: mask=0x%x x=%d y=%d\n", mask, x[0], y[0]);
++							printf("SWEET TOUCH: mask=0x%x x0=%d y0=%d irq=%d\n", mask, x[0], y[0], irq_low);
 +							last_mask = mask;
 +						}
 +						touch_report(mask, x, y);
@@ -318,18 +342,24 @@ index 27bc49d..7750ce4 100644
  	/* The digitizer covers the main display (backboardd maps it 1:1). */
  	setProperty("DisplayIntegrated", kOSBooleanTrue);
  	setProperty("SurfaceWidth", (unsigned long long)(68 << 16), 32);	/* mm, 16.16 */
-@@ -458,8 +458,8 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+@@ -458,8 +458,13 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
  	if (finger < 0 || finger >= SWEET_TOUCH_FINGERS) {
  		return;
  	}
 -	x = x < 0 ? 0 : (x > 1079 ? 1079 : x);
 -	y = y < 0 ? 0 : (y > 2399 ? 2399 : y);
++	int native = 0;
++	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
++	if (!native) {
++		x = (int)((int64_t)x * 1125 / 1440);
++		y = (int)((int64_t)y * 2436 / 3120);
++	}
 +	x = x < 0 ? 0 : (x > (fLogicalW - 1) ? (fLogicalW - 1) : x);
 +	y = y < 0 ? 0 : (y > (fLogicalH - 1) ? (fLogicalH - 1) : y);
  
  	IOLockLock(fLock);
  	bool was = fDown[finger];
-@@ -472,8 +472,8 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+@@ -472,8 +477,8 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
  		return;
  	}
  	if (!was && down) {
