@@ -1,47 +1,19 @@
---- a/iokit/Kernel/arm/hid/SweetHID.cpp
-+++ b/iokit/Kernel/arm/hid/SweetHID.cpp
-@@ -428,8 +428,8 @@
- 	if (!fLock || !IOHIDEventService::start(provider)) {
- 		return false;
- 	}
- 	int native = 0;
- 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
--	fLogicalW = native ? 1080 : 1125;
--	fLogicalH = native ? 2400 : 2436;
--	fOffX = (fLogicalW - 1080) / 2;
--	fOffY = (fLogicalH - 2400) / 2;
-+	fLogicalW = native ? 1440 : 1125;
-+	fLogicalH = native ? 3120 : 2436;
-+	fOffX = (fLogicalW - 1440) / 2;
-+	fOffY = (fLogicalH - 3120) / 2;
- 	/* The digitizer covers the main display (backboardd maps it 1:1). */
- 	setProperty("DisplayIntegrated", kOSBooleanTrue);
-@@ -472,8 +472,8 @@
- 	}
- 	if (!was && down) {
--		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > 1079 - SWEET_TOUCH_EDGE_PX ||
--		    y < SWEET_TOUCH_EDGE_PX || y > 2399 - SWEET_TOUCH_EDGE_PX;
-+		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > (fLogicalW - 1) - SWEET_TOUCH_EDGE_PX ||
-+		    y < SWEET_TOUCH_EDGE_PX || y > (fLogicalH - 1) - SWEET_TOUCH_EDGE_PX;
- 	}
- 
- 	collection = IOHIDEvent::digitizerEvent(now, 0, kIOHIDDigitizerTransducerTypeHand, false, 0, 0, 0);
+diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
+index 03defe6..4674334 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
-@@ -20,6 +20,11 @@
+@@ -32,6 +32,9 @@ void sweet_touch_init(void);
  #define TOUCH_MAX        10u
  #define TOUCH_GOODIX     1
  #define TOUCH_FTS        2
 +#define TOUCH_SW42000    3
-+
-+/* LG V50 SM8150 QUPv3_2 SE17 I2C and TLMM */
 +#define V50_SE_PA        0x00c80000u
 +#define V50_TLMM_PA      0x03000000u
- 
- #define SE_STATUS       0x040u
- #define SE_MCLK         0x048u
-@@ -190,6 +195,30 @@
- 	return 0;
+ /* GT9896 is Yellowstone in Xiaomi sweet-r-oss, not the Berlin protocol. */
+ #define GOODIX_PID_REG   0x4022u
+ #define GOODIX_EVENT_REG 0x4180u
+@@ -545,6 +548,32 @@ touch_se_init(void)
+ 	return true;
  }
  
 +/* Silicon Works SW42000 parser for LG V50 (I2C 0x28, reg 0x0200) */
@@ -71,14 +43,12 @@
 +}
 +
  static void
- touch_thread(void *arg, wait_result_t wr)
+ touch_thread(void *arg, wait_result_t result)
  {
-@@ -500,6 +529,15 @@
+@@ -562,6 +591,13 @@ touch_thread(void *arg, wait_result_t result)
  	st.gcc = ml_io_map(TOUCH_GCC_PA, 0x60000);
  	st.gpio = ml_io_map(TOUCH_NORTH_PA, 0x5b000);
  	st.se = ml_io_map(TOUCH_SE_PA, 0x4000);
-+
-+	/* Probe LG V50 SE17 if active */
 +	vm_offset_t v50_se = ml_io_map(V50_SE_PA, 0x4000);
 +	vm_offset_t v50_gpio = ml_io_map(V50_TLMM_PA, 0x100000);
 +	if (v50_se && touch_rd(v50_se, SE_FW) != 0) {
@@ -89,7 +59,7 @@
  	if (!st.gcc || !st.gpio || !st.se) {
  		printf("SWEET TOUCH: MMIO mapping failed\n");
  		goto out;
-@@ -530,6 +568,26 @@
+@@ -590,6 +626,25 @@ touch_thread(void *arg, wait_result_t result)
  	touch_gpio(8, 0, 3, 3, true, true);
  	touch_wait(300); /* exceeds vendor 5 ms test + 95 ms post-test wait */
  	uint8_t gid[32], legacy[32], fid1 = 0, fid2 = 0;
@@ -112,7 +82,36 @@
 +		touch_report(0, st.x, st.y);
 +		goto out;
 +	}
-+
  	st.probing = true;
  	int ge = touch_probe_info(GOODIX_PID_REG, gid);
  	printf("SWEET TOUCH: probe 0x5d err=%d pid=%02x%02x%02x%02x fw=%02x.%02x.%02x.%02x irq=%#x\n",
+diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
+index 27bc49d..70c1786 100644
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -434,10 +434,10 @@ SweetHIDTouch::start(IOService *provider)
+ 	}
+ 	int native = 0;
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+-	fLogicalW = native ? 1080 : 1125;
+-	fLogicalH = native ? 2400 : 2436;
+-	fOffX = (fLogicalW - 1080) / 2;
+-	fOffY = (fLogicalH - 2400) / 2;
++	fLogicalW = native ? 1440 : 1125;
++	fLogicalH = native ? 3120 : 2436;
++	fOffX = (fLogicalW - 1440) / 2;
++	fOffY = (fLogicalH - 3120) / 2;
+ 	/* The digitizer covers the main display (backboardd maps it 1:1). */
+ 	setProperty("DisplayIntegrated", kOSBooleanTrue);
+ 	setProperty("SurfaceWidth", (unsigned long long)(68 << 16), 32);	/* mm, 16.16 */
+@@ -472,8 +472,8 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+ 		return;
+ 	}
+ 	if (!was && down) {
+-		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > 1079 - SWEET_TOUCH_EDGE_PX ||
+-		    y < SWEET_TOUCH_EDGE_PX || y > 2399 - SWEET_TOUCH_EDGE_PX;
++		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > (fLogicalW - 1) - SWEET_TOUCH_EDGE_PX ||
++		    y < SWEET_TOUCH_EDGE_PX || y > (fLogicalH - 1) - SWEET_TOUCH_EDGE_PX;
+ 	}
+ 
+ 	collection = IOHIDEvent::digitizerEvent(now, 0, kIOHIDDigitizerTransducerTypeHand, false, 0, 0, 0);
