@@ -1,5 +1,5 @@
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 03defe6..e779a02 100644
+index 03defe6..cdde1ac 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
 @@ -214,7 +214,7 @@ static int
@@ -25,7 +25,7 @@ index 03defe6..e779a02 100644
  static int
  touch_read(uint8_t addr, uint16_t reg, bool wide, uint8_t *buf, unsigned len)
  {
-@@ -545,19 +552,180 @@ touch_se_init(void)
+@@ -545,19 +552,157 @@ touch_se_init(void)
  	return true;
  }
  
@@ -94,32 +94,9 @@ index 03defe6..e779a02 100644
 +		touch_gpio(55, 1, 0, 0, false, false);
 +		touch_gpio(56, 1, 0, 0, false, false);
 +
-+		/* Initialize SE17 I2C engine via safe helper */
-+		if (!touch_se_init()) {
-+			printf("SWEET TOUCH: SE17 not initialized by ABL; continuing with default config\n");
-+			touch_wr(st.se, 0xe18, 0);
-+			touch_wr(st.se, 0xe1c, 0);
-+			touch_wr(st.se, 0x644, 0);
-+			touch_wr(st.se, SE_IRQ_CLR, 0xffffffffu);
-+			touch_wr(st.se, 0x648, 0xffffffffu);
-+			touch_wr(st.se, SE_DMA, 0);
-+			touch_wr(st.se, 0x28, touch_rd(st.se, 0x28) | 0x7fu);
-+			touch_wr(st.se, 0xe30, touch_rd(st.se, 0xe30) | 0x0fu);
-+			touch_wr(st.se, 0x24, 0x7f);
-+			touch_wr(st.se, 0x20, 1);
-+			touch_wr(st.se, SE_CLK_SEL, 0);
-+			touch_wr(st.se, SE_MCLK, (7u << 4) | 1u);
-+			touch_wr(st.se, SE_SCL, (10u << 20) | (11u << 10) | 26u);
-+			touch_wr(st.se, 0x254, 0);
-+			touch_wr(st.se, 0x260, SE_PACK0);
-+			touch_wr(st.se, 0x264, SE_PACK1);
-+			touch_wr(st.se, 0x284, SE_PACK0);
-+			touch_wr(st.se, 0x288, SE_PACK1);
-+			touch_wr(st.se, SE_TX_WM, 0);
-+			touch_wr(st.se, SE_IRQ_CLR, 0xffffffffu);
-+			touch_wr(st.se, 0x648, 0xffffffffu);
-+			touch_wr(st.se, SE_IRQ_EN, SE_EVENTS);
-+		}
++		/* SE17 is already clocked and loaded with I2C firmware by ABL */
++		touch_wr(st.se, SE_IRQ_CLR, 0xffffffffu);
++		touch_wr(st.se, SE_IRQ_EN, SE_EVENTS);
 +
 +		printf("SWEET TOUCH: SE17 status=0x%08x fw=0x%08x\n",
 +		    touch_rd(st.se, SE_STATUS), touch_rd(st.se, SE_FW));
