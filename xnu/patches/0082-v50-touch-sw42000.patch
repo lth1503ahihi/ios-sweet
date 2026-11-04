@@ -1,8 +1,8 @@
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 03defe6..1072a38 100644
+index 03defe6..a56f236 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
-@@ -32,6 +32,66 @@ void sweet_touch_init(void);
+@@ -32,6 +32,10 @@ void sweet_touch_init(void);
  #define TOUCH_MAX        10u
  #define TOUCH_GOODIX     1
  #define TOUCH_FTS        2
@@ -10,7 +10,13 @@ index 03defe6..1072a38 100644
 +
 +#define V50_SE_PA        0x00c80000u
 +#define V50_TLMM_PA      0x03000000u
-+
+ /* GT9896 is Yellowstone in Xiaomi sweet-r-oss, not the Berlin protocol. */
+ #define GOODIX_PID_REG   0x4022u
+ #define GOODIX_EVENT_REG 0x4180u
+@@ -545,10 +549,65 @@ touch_se_init(void)
+ 	return true;
+ }
+ 
 +#pragma pack(1)
 +struct sw42000_touch_data {
 +    uint32_t track_id : 5;
@@ -66,10 +72,6 @@ index 03defe6..1072a38 100644
 +	return 0;
 +}
 +
- /* GT9896 is Yellowstone in Xiaomi sweet-r-oss, not the Berlin protocol. */
- #define GOODIX_PID_REG   0x4022u
- #define GOODIX_EVENT_REG 0x4180u
-@@ -548,7 +608,7 @@ touch_se_init(void)
  static void
  touch_thread(void *arg, wait_result_t result)
  {
@@ -78,7 +80,7 @@ index 03defe6..1072a38 100644
  	(void)arg;
  	(void)result;
  	/*
-@@ -557,7 +617,39 @@ touch_thread(void *arg, wait_result_t result)
+@@ -557,7 +616,39 @@ touch_thread(void *arg, wait_result_t result)
  	 */
  	(void)PE_parse_boot_argn("sweettouchdelay", &delay_s, sizeof(delay_s));
  	printf("SWEET TOUCH: starting in %u s\n", delay_s);
