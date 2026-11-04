@@ -1,0 +1,118 @@
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -428,8 +428,8 @@
+ 	if (!fLock || !IOHIDEventService::start(provider)) {
+ 		return false;
+ 	}
+ 	int native = 0;
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
+-	fLogicalW = native ? 1080 : 1125;
+-	fLogicalH = native ? 2400 : 2436;
+-	fOffX = (fLogicalW - 1080) / 2;
+-	fOffY = (fLogicalH - 2400) / 2;
++	fLogicalW = native ? 1440 : 1125;
++	fLogicalH = native ? 3120 : 2436;
++	fOffX = (fLogicalW - 1440) / 2;
++	fOffY = (fLogicalH - 3120) / 2;
+ 	/* The digitizer covers the main display (backboardd maps it 1:1). */
+ 	setProperty("DisplayIntegrated", kOSBooleanTrue);
+@@ -472,8 +472,8 @@
+ 	}
+ 	if (!was && down) {
+-		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > 1079 - SWEET_TOUCH_EDGE_PX ||
+-		    y < SWEET_TOUCH_EDGE_PX || y > 2399 - SWEET_TOUCH_EDGE_PX;
++		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > (fLogicalW - 1) - SWEET_TOUCH_EDGE_PX ||
++		    y < SWEET_TOUCH_EDGE_PX || y > (fLogicalH - 1) - SWEET_TOUCH_EDGE_PX;
+ 	}
+ 
+ 	collection = IOHIDEvent::digitizerEvent(now, 0, kIOHIDDigitizerTransducerTypeHand, false, 0, 0, 0);
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -20,6 +20,11 @@
+ #define TOUCH_MAX        10u
+ #define TOUCH_GOODIX     1
+ #define TOUCH_FTS        2
++#define TOUCH_SW42000    3
++
++/* LG V50 SM8150 QUPv3_2 SE17 I2C and TLMM */
++#define V50_SE_PA        0x00c80000u
++#define V50_TLMM_PA      0x03000000u
+ 
+ #define SE_STATUS       0x040u
+ #define SE_MCLK         0x048u
+@@ -190,6 +195,30 @@
+ 	return 0;
+ }
+ 
++/* Silicon Works SW42000 parser for LG V50 (I2C 0x28, reg 0x0200) */
++static int
++touch_sw42000(void)
++{
++	uint8_t buf[112] = {0};
++	int err = touch_read(0x28, 0x0200, true, buf, sizeof(buf));
++	if (err) {
++		return err;
++	}
++	unsigned cnt = buf[8] & 0x1fu;
++	uint32_t mask = 0;
++	int x[TOUCH_MAX] = {0}, y[TOUCH_MAX] = {0};
++	for (unsigned i = 0; i < cnt && i < TOUCH_MAX; ++i) {
++		const uint8_t *p = buf + 12 + i * 10;
++		unsigned event = p[0] & 0x0fu;
++		unsigned id = p[1];
++		if (id < TOUCH_MAX && (event == 1 || event == 2)) {
++			mask |= (1u << id);
++			x[id] = (int)p[2] | ((int)p[3] << 8);
++			y[id] = (int)p[4] | ((int)p[5] << 8);
++		}
++	}
++	touch_report(mask, x, y);
++	return 0;
++}
++
+ static void
+ touch_thread(void *arg, wait_result_t wr)
+ {
+@@ -500,6 +529,15 @@
+ 	st.gcc = ml_io_map(TOUCH_GCC_PA, 0x60000);
+ 	st.gpio = ml_io_map(TOUCH_NORTH_PA, 0x5b000);
+ 	st.se = ml_io_map(TOUCH_SE_PA, 0x4000);
++
++	/* Probe LG V50 SE17 if active */
++	vm_offset_t v50_se = ml_io_map(V50_SE_PA, 0x4000);
++	vm_offset_t v50_gpio = ml_io_map(V50_TLMM_PA, 0x100000);
++	if (v50_se && touch_rd(v50_se, SE_FW) != 0) {
++		printf("SWEET TOUCH: detected SM8150 QUP SE17 at 0x%08x; using LG V50 touch\n", V50_SE_PA);
++		st.se = v50_se;
++		st.gpio = v50_gpio;
++	}
+ 	if (!st.gcc || !st.gpio || !st.se) {
+ 		printf("SWEET TOUCH: MMIO mapping failed\n");
+ 		goto out;
+@@ -530,6 +568,26 @@
+ 	touch_gpio(8, 0, 3, 3, true, true);
+ 	touch_wait(300); /* exceeds vendor 5 ms test + 95 ms post-test wait */
+ 	uint8_t gid[32], legacy[32], fid1 = 0, fid2 = 0;
++
++	/* Probe SW42000 at 0x28 (LG V50) */
++	uint8_t sw_info[16] = {0};
++	int swe = touch_read(0x28, 0x0200, true, sw_info, sizeof(sw_info));
++	printf("SWEET TOUCH: probe 0x28 err=%d sts=%02x%02x%02x%02x\n",
++	    swe, sw_info[0], sw_info[1], sw_info[2], sw_info[3]);
++	if (!swe) {
++		st.kind = TOUCH_SW42000;
++		printf("SWEET TOUCH: selected Silicon Works SW42000 (LG V50 1440x3120)\n");
++		while (!st.dead) {
++			int err = touch_sw42000();
++			if (err) {
++				delay(2000);
++			}
++			touch_wait(10);
++		}
++		touch_report(0, st.x, st.y);
++		goto out;
++	}
++
+ 	st.probing = true;
+ 	int ge = touch_probe_info(GOODIX_PID_REG, gid);
+ 	printf("SWEET TOUCH: probe 0x5d err=%d pid=%02x%02x%02x%02x fw=%02x.%02x.%02x.%02x irq=%#x\n",
