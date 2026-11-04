@@ -1,79 +1,112 @@
 diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
-index 03defe6..4674334 100644
+index 03defe6..1072a38 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
-@@ -32,6 +32,9 @@ void sweet_touch_init(void);
+@@ -32,6 +32,66 @@ void sweet_touch_init(void);
  #define TOUCH_MAX        10u
  #define TOUCH_GOODIX     1
  #define TOUCH_FTS        2
 +#define TOUCH_SW42000    3
++
 +#define V50_SE_PA        0x00c80000u
 +#define V50_TLMM_PA      0x03000000u
- /* GT9896 is Yellowstone in Xiaomi sweet-r-oss, not the Berlin protocol. */
- #define GOODIX_PID_REG   0x4022u
- #define GOODIX_EVENT_REG 0x4180u
-@@ -545,6 +548,32 @@ touch_se_init(void)
- 	return true;
- }
- 
-+/* Silicon Works SW42000 parser for LG V50 (I2C 0x28, reg 0x0200) */
++
++#pragma pack(1)
++struct sw42000_touch_data {
++    uint32_t track_id : 5;
++    uint32_t tool_type : 3;
++    uint32_t angle : 8;
++    uint32_t event : 2;
++    uint32_t x : 14;
++    uint32_t y : 14;
++    uint32_t pressure : 8;
++    uint32_t reserve1 : 10;
++    uint32_t reserve2 : 4;
++    uint32_t width_major : 14;
++    uint32_t width_minor : 14;
++};
++
++struct sw42000_touch_info {
++    uint32_t ic_status;
++    uint32_t tc_status;
++    uint32_t wakeup_type : 8;
++    uint32_t touch_cnt : 5;
++    uint32_t button_cnt : 3;
++    uint32_t self_recal : 2;
++    uint32_t mutual_recal : 2;
++    uint32_t abnormal1_recal : 2;
++    uint32_t abnormal2_recal : 2;
++    uint32_t current_mode : 1;
++    uint32_t rmdiff : 7;
++    struct sw42000_touch_data data[10];
++};
++#pragma pack()
++
 +static int
-+touch_sw42000(void)
++touch_sw42000_read(uint8_t addr)
 +{
-+	uint8_t buf[112] = {0};
-+	int err = touch_read(0x28, 0x0200, true, buf, sizeof(buf));
++	struct sw42000_touch_info info;
++	int err = touch_read(addr, 0x2600, true, (uint8_t *)&info, sizeof(info));
 +	if (err) {
 +		return err;
 +	}
-+	unsigned cnt = buf[8] & 0x1fu;
++	unsigned cnt = info.touch_cnt;
 +	uint32_t mask = 0;
 +	int x[TOUCH_MAX] = {0}, y[TOUCH_MAX] = {0};
-+	for (unsigned i = 0; i < cnt && i < TOUCH_MAX; ++i) {
-+		const uint8_t *p = buf + 12 + i * 10;
-+		unsigned event = p[0] & 0x0fu;
-+		unsigned id = p[1];
-+		if (id < TOUCH_MAX && (event == 1 || event == 2)) {
++	for (unsigned i = 0; i < cnt && i < 10; ++i) {
++		struct sw42000_touch_data *p = &info.data[i];
++		unsigned id = p->track_id;
++		if (id < TOUCH_MAX && p->event != 3) {
 +			mask |= (1u << id);
-+			x[id] = (int)p[2] | ((int)p[3] << 8);
-+			y[id] = (int)p[4] | ((int)p[5] << 8);
++			x[id] = p->x;
++			y[id] = p->y;
 +		}
 +	}
 +	touch_report(mask, x, y);
 +	return 0;
 +}
 +
+ /* GT9896 is Yellowstone in Xiaomi sweet-r-oss, not the Berlin protocol. */
+ #define GOODIX_PID_REG   0x4022u
+ #define GOODIX_EVENT_REG 0x4180u
+@@ -548,7 +608,7 @@ touch_se_init(void)
  static void
  touch_thread(void *arg, wait_result_t result)
  {
-@@ -562,6 +591,13 @@ touch_thread(void *arg, wait_result_t result)
- 	st.gcc = ml_io_map(TOUCH_GCC_PA, 0x60000);
- 	st.gpio = ml_io_map(TOUCH_NORTH_PA, 0x5b000);
- 	st.se = ml_io_map(TOUCH_SE_PA, 0x4000);
+-	unsigned delay_s = 45;
++	unsigned delay_s = 2;
+ 	(void)arg;
+ 	(void)result;
+ 	/*
+@@ -557,7 +617,39 @@ touch_thread(void *arg, wait_result_t result)
+ 	 */
+ 	(void)PE_parse_boot_argn("sweettouchdelay", &delay_s, sizeof(delay_s));
+ 	printf("SWEET TOUCH: starting in %u s\n", delay_s);
+-	touch_wait(delay_s * 1000u);
++	if (delay_s) {
++		touch_wait(delay_s * 1000u);
++	}
++
 +	vm_offset_t v50_se = ml_io_map(V50_SE_PA, 0x4000);
-+	vm_offset_t v50_gpio = ml_io_map(V50_TLMM_PA, 0x100000);
-+	if (v50_se && touch_rd(v50_se, SE_FW) != 0) {
-+		printf("SWEET TOUCH: detected SM8150 QUP SE17 at 0x%08x; using LG V50 touch\n", V50_SE_PA);
++	vm_offset_t v50_gpio = ml_io_map(V50_TLMM_PA, 0x200000);
++	if (v50_se) {
++		printf("SWEET TOUCH: detected LG V50 SM8150 QUP SE17 at 0x%08x\n", V50_SE_PA);
 +		st.se = v50_se;
 +		st.gpio = v50_gpio;
-+	}
- 	if (!st.gcc || !st.gpio || !st.se) {
- 		printf("SWEET TOUCH: MMIO mapping failed\n");
- 		goto out;
-@@ -590,6 +626,25 @@ touch_thread(void *arg, wait_result_t result)
- 	touch_gpio(8, 0, 3, 3, true, true);
- 	touch_wait(300); /* exceeds vendor 5 ms test + 95 ms post-test wait */
- 	uint8_t gid[32], legacy[32], fid1 = 0, fid2 = 0;
++		(void)touch_se_init();
 +
-+	/* Probe SW42000 at 0x28 (LG V50) */
-+	uint8_t sw_info[16] = {0};
-+	int swe = touch_read(0x28, 0x0200, true, sw_info, sizeof(sw_info));
-+	printf("SWEET TOUCH: probe 0x28 err=%d sts=%02x%02x%02x%02x\n",
-+	    swe, sw_info[0], sw_info[1], sw_info[2], sw_info[3]);
-+	if (!swe) {
++		uint8_t sw_addr = 0x20;
++		struct sw42000_touch_info info;
++		int swe = touch_read(sw_addr, 0x2600, true, (uint8_t *)&info, sizeof(info));
++		if (swe) {
++			sw_addr = 0x28;
++			swe = touch_read(sw_addr, 0x2600, true, (uint8_t *)&info, sizeof(info));
++		}
++		printf("SWEET TOUCH: probe SW42000 at 0x%02x: err=%d\n", sw_addr, swe);
 +		st.kind = TOUCH_SW42000;
-+		printf("SWEET TOUCH: selected Silicon Works SW42000 (LG V50 1440x3120)\n");
++		printf("SWEET TOUCH: selected Silicon Works SW42000 (LG V50 1440x3120) at 0x%02x\n", sw_addr);
 +		while (!st.dead) {
-+			int err = touch_sw42000();
++			int err = touch_sw42000_read(sw_addr);
 +			if (err) {
 +				delay(2000);
 +			}
@@ -82,9 +115,10 @@ index 03defe6..4674334 100644
 +		touch_report(0, st.x, st.y);
 +		goto out;
 +	}
- 	st.probing = true;
- 	int ge = touch_probe_info(GOODIX_PID_REG, gid);
- 	printf("SWEET TOUCH: probe 0x5d err=%d pid=%02x%02x%02x%02x fw=%02x.%02x.%02x.%02x irq=%#x\n",
++
+ 	printf("SWEET TOUCH: mapping GCC/TLMM/SE7\n");
+ 	st.gcc = ml_io_map(TOUCH_GCC_PA, 0x60000);
+ 	st.gpio = ml_io_map(TOUCH_NORTH_PA, 0x5b000);
 diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
 index 27bc49d..70c1786 100644
 --- a/iokit/Kernel/arm/hid/SweetHID.cpp
